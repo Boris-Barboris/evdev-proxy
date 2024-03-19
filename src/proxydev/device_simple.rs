@@ -7,7 +7,9 @@ use std::thread;
 
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::channel;
+use input_linux::EventKind;
 use input_linux::sys::input_event;
+use num;
 
 use crate::proxydev::evdev::device_poller;
 use crate::proxydev::uinput::{new_uinput_aio, new_uinput_kbd, new_uinput_mouse};
@@ -87,7 +89,7 @@ impl Simple {
                     }
 
                     let (n, rx) = &local_sources[op_idx];
-                    let ev = match op.recv(rx) {
+                    let mut ev = match op.recv(rx) {
                         Ok(e) => e,
                         Err(_) => {
                             error!("Failed to read source device '{:?}', removing from '{:?}' and reloading", n, dev_name);
@@ -97,6 +99,36 @@ impl Simple {
                     };
 
                     debug!("Proxy device '{:?}' got event from '{:?}': {:?}", dev_name, n, ev);
+
+                    // Due to WinAPI HID event relative input size limit of 255 we have to split
+                    // mouse events on hypervisor side.
+                    // https://github.com/virtio-win/kvm-guest-drivers-windows/issues/385
+                    if ev.type_ == EventKind::Relative as u16 {
+                        let mut relative_value_to_send = ev.value;
+                        while relative_value_to_send.abs() > 255 {
+                            debug!("Detected LARGE relative input event {:?}, splitting event", ev);
+                            ev.value = num::clamp(relative_value_to_send, -255, 255);
+                            match uin.write(&[ev]) {
+                                Ok(_) => {},
+                                Err(e) => {
+                                    error!("Failed to write event to '{:?}': {:?}", dev_name, e);
+                                }
+                            }
+                            relative_value_to_send -= ev.value;
+                            let sync_event = input_event {
+                                time: ev.time,
+                                type_: EventKind::Synchronize as u16,
+                                code: 0,
+                                value: 0
+                            };
+                            match uin.write(&[sync_event]) {
+                                Ok(_) => {},
+                                Err(e) => {
+                                    error!("Failed to write sync event to '{:?}': {:?}", dev_name, e);
+                                }
+                            }
+                        }
+                    }
                     match uin.write(&[ev]) {
                         Ok(_) => {},
                         Err(e) => {
