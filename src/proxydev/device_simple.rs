@@ -128,6 +128,7 @@ impl Simple {
                                 }
                             }
                         }
+                        ev.value = relative_value_to_send;
                     }
                     match uin.write(&[ev]) {
                         Ok(_) => {},
